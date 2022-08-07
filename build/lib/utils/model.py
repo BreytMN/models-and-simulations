@@ -1,19 +1,29 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib import cm
 
 import pandas as pd
 import numpy as np
+import scipy as sp
+
+from lightgbm import LGBMClassifier
+from lightgbm import early_stopping, log_evaluation 
+from lightgbm import plot_importance, plot_metric
+
+from mapie.metrics import classification_coverage_score, classification_mean_width_score
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix
+
 
 def encoding_labels(y: pd.Series):
-    from sklearn.preprocessing import LabelEncoder
     encoder = LabelEncoder()
     y = encoder.fit_transform(y)
     
     return y, encoder
 
-def train_calib_test_split(X: pd.DataFrame, y: pd.Series, split: tuple=(0.6,0.2,0.2), encoded: bool=True, random_state: int=357):
-    from sklearn.model_selection import train_test_split
-    
+def train_calib_test_split(X: pd.DataFrame, y: pd.Series, split: tuple=(0.6,0.2,0.2), encoded: bool=True, random_state: int=357):    
     encoder=None
     if not encoded:
         y, encoder = self.encoding_labels(y)
@@ -27,17 +37,51 @@ def train_calib_test_split(X: pd.DataFrame, y: pd.Series, split: tuple=(0.6,0.2,
     
     return return_list
 
+def boruta(X: pd.DataFrame, y: pd.Series, trials: int=20, seed_multiplier: int=1, verbose: bool=False) -> pd.DataFrame:
+    hits = np.zeros((len(X.columns)))
+    cols = X.columns
+    shadow_cols = [f'shadow - {col}' for col in X.columns]
+    
+    for seed in range(trials):
+        
+        np.random.seed(seed*seed_multiplier)
+        X_shadow = X.apply(np.random.permutation)
+        X_shadow.columns = shadow_cols
+        
+        shadow_cols_cat = X_shadow.select_dtypes(include='object').columns
+        X_shadow[shadow_cols_cat] = X_shadow[shadow_cols_cat].astype('category')
+        
+        X_boruta = pd.concat([X, X_shadow], axis = 1)
+        
+        X_train, X_calib, X_test, y_train, y_calib, y_test = train_calib_test_split(X_boruta, y, random_state=seed*seed_multiplier)
+        
+        lgb = LGBMClassifier(boosting_type='rf', bagging_freq=1, bagging_fraction=0.1, max_depth=3, random_state=seed*seed_multiplier)
+        lgb.fit(X_train, y_train,
+                eval_set=[(X_calib, y_calib), (X_test, y_test), (X_train, y_train)],
+                callbacks=[early_stopping(100, verbose=False)])
+        
+        feat_imp_X = lgb.feature_importances_[:len(X.columns)]
+        feat_imp_shadow = lgb.feature_importances_[len(X.columns):]
+        hits += (feat_imp_X > feat_imp_shadow.max());
+        
+        if verbose:
+            print(f'Event {seed}:', np.sum(feat_imp_X > feat_imp_shadow.max()), 'hits')
+        
+    hits = pd.concat([pd.Series(cols, name='Features'), pd.Series(hits, name='Hits')], axis=1)
+    prob = pd.DataFrame(np.cumsum([sp.stats.binom.pmf(x, trials, .5) for x in range(trials + 1)]), columns=['Cumulated Probability'])
+    hits = hits.set_index('Hits').join(prob, how='inner').reset_index().rename(columns={'index': 'Hits'}).set_index('Features').sort_values(['Hits', 'Features'], ascending=[False, True])
+    hits['Cumulated Probability'] = np.round(hits['Cumulated Probability'], 6)
+    
+    return hits
+
 class model_report:
     def __init__(self, X_test: pd.DataFrame, y_test: pd.Series, y_encoder=False, calibration_type: str=''):
         self.X_test = X_test
         self.y_test = y_test
         self.y_encoder = y_encoder
         self.calibration_type = calibration_type
-        print(type(y_encoder))
         
-    def print_classification_report(self, y_test, y_pred):
-        from sklearn.metrics import classification_report
-        
+    def print_classification_report(self, y_test, y_pred):        
         print('----------------------Classification Report----------------------')
         print(classification_report(y_test, y_pred))
         
@@ -78,7 +122,6 @@ class model_report:
             print('other sets:', size_mult)
             
     def plot_confusion_matrix(self, y_test, y_pred, labels, ax):
-        from sklearn.metrics import confusion_matrix
         
         sns.heatmap(
             confusion_matrix(y_test, y_pred),
@@ -91,17 +134,14 @@ class model_report:
         ax.set_ylabel('True Labels', fontsize=14)
         
     def lightgbm_classifier(self, model):
-        from lightgbm import plot_importance, plot_metric
-
         y_pred = model.predict(self.X_test)
         y_test = self.y_test
         labels = model.classes_
-        print(labels)
+        
         if self.y_encoder: 
             y_pred = self.y_encoder.inverse_transform(y_pred)
             y_test = self.y_encoder.inverse_transform(y_test)
             labels = self.y_encoder.inverse_transform(labels)
-            print(labels)
 
         self.print_classification_report(y_test, y_pred)
 
@@ -116,10 +156,7 @@ class model_report:
         ax[2].set_xlabel('Importances', fontsize=14)
         ax[2].set_ylabel('', fontsize=14);
         
-    def calibration_classifier(self, conformal_model):
-        from mapie.metrics import classification_coverage_score, classification_mean_width_score
-        from matplotlib import cm
-        
+    def calibration_classifier(self, conformal_model):        
         y_true, y_pred_conformal = conformal_model.predict(self.X_test, self.alphas)
         self.print_calibration_report(y_true, y_pred_conformal)
         
