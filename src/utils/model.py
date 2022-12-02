@@ -180,19 +180,40 @@ class model_report:
         ax[0].set_ylabel("Count")
         
         alpha_range = np.arange(0.01, 1, 0.01)
-        _, y_pred_conformal_range = conformal_model.predict(self.X_test, alpha=alpha_range)
+        y_pred , y_pred_conformal_range = conformal_model.predict(self.X_test, alpha=alpha_range)
         
-        coverages = [classification_coverage_score(self.y_test, y_pred_conformal_range[:, :, i])
-                     for i, _ in enumerate(alpha_range)]
+        coverages = [classification_coverage_score(self.y_test, y_pred_conformal_range[:, :, k])
+                     for k, _ in enumerate(alpha_range)]
     
-        ax[1].scatter(1 - alpha_range, coverages, label='score')
+        fig1L = ax[1].scatter(1 - alpha_range, coverages, label='score')
         ax[1].set_xlabel("1 - alpha")
         ax[1].set_ylabel("Coverage score")
-        ax[1].plot([0, 1], [0, 1], label="x=y", color="black")
-        ax[1].legend()
+        ax[1].set_ylim(-0.02, 1.02)
         
-        sizes = [classification_mean_width_score(y_pred_conformal_range[:, :, i])
-                 for i, _ in enumerate(alpha_range)]
+        ax1line = ax[1].twinx()
+        fig1Line, = ax1line.plot([0, 1], [0, 1], label="x=y", color="black")
+        ax1line.set_ylim(-0.02, 1.02)
+        
+        empty = []
+        for k, _ in enumerate(alpha_range):
+            count = 0
+            
+            for i, _ in enumerate(y_pred):
+                if sum(y_pred_conformal_range[i, :, k]) == 0:
+                    count += 1
+                    
+            empty.append(count)
+            empty[k] = empty[k]/len(y_pred)
+        
+        ax1right = ax[1].twinx()
+        fig1R = ax1right.scatter(1 - alpha_range, empty, label='% Empty', color="tab:orange")
+        ax1right.set_ylabel("Empty Sets")
+        ax1right.set_ylim(-0.02, 1.02)
+        
+        ax[1].legend(handles=[fig1L, fig1R, fig1Line], loc='upper center')
+        
+        sizes = [classification_mean_width_score(y_pred_conformal_range[:, :, k])
+                 for k, _ in enumerate(alpha_range)]
         
         ax[2].scatter(1 - alpha_range, sizes, label='score')
         ax[2].set_xlabel("1 - alpha")
